@@ -1,0 +1,51 @@
+# BulkRoute53Update.ps1
+# Requires AWS CLI configured (aws configure)
+
+param(
+    [string]$CsvPath = ".\records.csv"
+)
+
+# Verify AWS CLI
+if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+    Write-Error "AWS CLI not found. Install it first: https://aws.amazon.com/cli/"
+    exit 1
+}
+
+# Import CSV
+$records = Import-Csv $CsvPath
+Write-Host "Processing $($records.Count) records..."
+
+# Group by ZoneId to send batch requests per hosted zone
+$groupedRecords = $records | Group-Object ZoneId
+
+foreach ($zoneGroup in $groupedRecords) {
+    $zoneId = $zoneGroup.Name
+    $changes = @()
+
+    foreach ($rec in $zoneGroup.Group) {
+        $changes += @{
+            Action = $rec.Action
+            ResourceRecordSet = @{
+                Name = $rec.Name
+                Type = $rec.Type
+                TTL  = [int]$rec.TTL
+                ResourceRecords = @(@{ Value = $rec.Value })
+            }
+        }
+    }
+
+    # Build JSON payload for Route 53
+    $changeBatch = @{
+        Changes = $changes
+    } | ConvertTo-Json -Depth 5
+
+    $jsonPath = ".\changes-$zoneId.json"
+    $changeBatch | Out-File -FilePath $jsonPath -Encoding utf8
+
+    Write-Host "Submitting batch for Zone $zoneId ..."
+    aws route53 change-resource-record-sets `
+        --hosted-zone-id $zoneId `
+        --change-batch file://$jsonPath | Out-Null
+
+    Write-Host "✅ Changes submitted for zone $zoneId"
+}
