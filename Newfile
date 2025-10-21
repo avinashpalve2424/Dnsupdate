@@ -1,0 +1,49 @@
+# BulkRoute53Update.ps1
+# Performs bulk DNS updates in one Route 53 hosted zone
+# Requires AWS CLI configured (aws configure)
+
+param(
+    [string]$CsvPath = ".\records.csv",
+    [string]$ZoneId  # e.g., Z123456ABCDEFG
+)
+
+if (-not $ZoneId) {
+    Write-Error "You must specify a Hosted Zone ID using -ZoneId."
+    exit 1
+}
+
+# Ensure AWS CLI is available
+if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+    Write-Error "AWS CLI not found. Install it first: https://aws.amazon.com/cli/"
+    exit 1
+}
+
+# Import records
+$records = Import-Csv $CsvPath
+Write-Host "Processing $($records.Count) records for zone $ZoneId..."
+
+$changes = @()
+
+foreach ($rec in $records) {
+    $changes += @{
+        Action = $rec.Action
+        ResourceRecordSet = @{
+            Name = $rec.Name
+            Type = $rec.Type
+            TTL  = [int]$rec.TTL
+            ResourceRecords = @(@{ Value = $rec.Value })
+        }
+    }
+}
+
+# Build JSON payload
+$changeBatch = @{ Changes = $changes } | ConvertTo-Json -Depth 5
+$jsonPath = ".\changes-$ZoneId.json"
+$changeBatch | Out-File -FilePath $jsonPath -Encoding utf8
+
+Write-Host "Submitting changes to Route 53 for Zone ID $ZoneId..."
+aws route53 change-resource-record-sets `
+    --hosted-zone-id $ZoneId `
+    --change-batch file://$jsonPath | Out-Null
+
+Write-Host "✅ DNS changes submitted successfully for zone $ZoneId."
