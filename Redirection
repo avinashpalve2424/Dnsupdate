@@ -1,0 +1,120 @@
+You can use the NGINX Ingress Controller ConfigMap to define some global behaviors (like proxy settings, headers, or custom snippets), but you cannot fully define a per-host proxy redirection (like secure.test.bank → CloudFront) only with the global ConfigMap — because the ConfigMap applies to all ingress objects managed by that controller.
+
+That said, there are two valid approaches, depending on what level of control you want.
+
+⸻
+
+🧩 Option 1: Use ConfigMap for Global Proxy (Not Per Host)
+
+If you want the entire ingress controller to proxy all traffic to CloudFront, you can inject custom NGINX directives via the nginx-configuration ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-configuration
+  namespace: ingress-nginx
+data:
+  http-snippet: |
+    resolver 8.8.8.8 ipv6=off;
+    map $host $backend_upstream {
+      default "d1234abcd.cloudfront.net";
+    }
+  server-snippet: |
+    location / {
+      proxy_pass https://$backend_upstream;
+      proxy_ssl_server_name on;
+      proxy_set_header Host secure.test.bank;
+      proxy_set_header X-Forwarded-Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-configuration
+  namespace: ingress-nginx
+data:
+  http-snippet: |
+    resolver 8.8.8.8 ipv6=off;
+    map $host $proxy_target {
+      "secure.test.bank" "d1234abcd.cloudfront.net";
+      default "";
+    }
+  server-snippet: |
+    location / {
+      if ($proxy_target != "") {
+        proxy_pass https://$proxy_target;
+        proxy_ssl_server_name on;
+        proxy_set_header Host secure.test.bank;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        break;
+      }
+    }
+
+nginx.ingress.kubernetes.io/server-snippet: |
+  location / {
+    resolver 8.8.8.8;
+    proxy_pass https://d1234abcd.cloudfront.net;
+    proxy_set_header Host secure.test.bank;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: microservice-b-ingress
+  namespace: namespace-b
+  annotations:
+    # Ensure this ingress uses the same NGINX ingress controller
+    kubernetes.io/ingress.class: "nginx"
+
+    # Custom server snippet to handle proxy forwarding
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location / {
+        # Allow NGINX to resolve external domains like CloudFront
+        resolver 8.8.8.8 valid=300s ipv6=off;
+
+        # Define the CloudFront backend
+        set $cloudfront_backend "d1234abcd.cloudfront.net";
+
+        # Proxy settings
+        proxy_pass https://$cloudfront_backend;
+
+        # Enable SNI for HTTPS to CloudFront
+        proxy_ssl_server_name on;
+
+        # Override Host header so CloudFront thinks request is for secure.test.bank
+        proxy_set_header Host secure.test.bank;
+
+        # Preserve client and scheme info
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+
+        # Optional: Tune proxy behavior
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+      }
+
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: secure.test.bank
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            # Dummy backend - traffic won’t reach this because server-snippet overrides it
+            name: microservice-b
+            port:
+              number: 80
+
+  tls:
+  - hosts:
+      - secure.test.bank
+    secretName: secure-test-bank-tls
+
